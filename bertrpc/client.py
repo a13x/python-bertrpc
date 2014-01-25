@@ -10,24 +10,38 @@ class Service(object):
         self.port = port
         self.timeout = timeout
 
-    def request(self, kind, options=None):
-        if kind in ['call', 'cast']:
-            self._verify_options(options)
-            return Request(self, bert.Atom(kind), options)
-        else:
-            raise error.InvalidRequest('unsupported request of kind: "%s"' % kind)
+    def connect(self):
+        try:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            if self.timeout is not None: self.sock.settimeout(self.timeout)
+            self.sock.connect((self.host, self.port))
+        except socket.error:
+            raise error.ConnectionError('Unable to connect to %s:%s' % (self.host, self.port))
 
-    def _verify_options(self, options):
-        if options is not None:
-            cache = options.get('cache', None)
-            if cache is not None:
-                if len(cache) >= 2 and cache[0] == 'validation' and type(cache[1]) == type(str()):
-                    pass
+    def close(self):
+        self.sock.close()
+
+    def __getattr__(self, attr):
+        def verify_options(options):
+            if options is not None:
+                cache = options.get('cache', None)
+                if cache is not None:
+                    if len(cache) >= 2 and cache[0] == 'validation' and type(cache[1]) == type(str()):
+                        pass
+                    else:
+                        raise error.InvalidOption('Valid cache args are [validation, String]')
                 else:
-                    raise error.InvalidOption('Valid cache args are [validation, String]')
-            else:
-                raise error.InvalidOption('Valid options are: cache')
+                    raise error.InvalidOption('Valid options are: cache')
     
+        def callable(options=None, **kwargs):
+            if attr in ['call', 'cast']:
+                verify_options(options)
+                return Request(self, bert.Atom(attr), options)
+            else:
+                raise error.InvalidRequest('unsupported request of kind: "%s"' % attr)
+        return callable
+
     
 class Request(object):
     def __init__(self, service, kind, options):
@@ -78,10 +92,6 @@ class Action(object):
         
     def _transaction(self, bert_request):
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            if self.service.timeout is not None: sock.settimeout(self.service.timeout)
-            sock.connect((self.service.host, self.service.port))
             if self.request.options is not None:
                 if self.request.options.get('cache', None) is not None:
                     if self.request.options['cache'][0] == 'validation':
@@ -89,30 +99,26 @@ class Action(object):
                         info_bert = Encoder().encode(
                             (bert.Atom('info'), bert.Atom('cache'), [bert.Atom('validation'), bert.Atom(token)]))
                         info_header = struct.pack(">l", len(info_bert))
-                        sock.sendall(info_header)
-                        sock.sendall(info_bert)
+                        self.service.sock.sendall(info_header)
+                        self.service.sock.sendall(info_bert)
             header = struct.pack(">l", len(bert_request))
-            sock.sendall(header)
-            sock.sendall(bert_request)
-            lenheader = sock.recv(4)
+            self.service.sock.sendall(header)
+            self.service.sock.sendall(bert_request)
+            lenheader = self.service.sock.recv(4)
             if lenheader is None: raise error.ProtocolError(error.ProtocolError.NO_HEADER)
             length = struct.unpack(">l",lenheader)[0]
 
             bert_response = ''
             while len(bert_response) < length:
-                response_part = sock.recv(length - len(bert_response))
+                response_part = self.service.sock.recv(length - len(bert_response))
                 if response_part is None or len(response_part) == 0:
                     raise error.ProtocolError(error.ProtocolError.NO_DATA)
                 bert_response += response_part
 
-            sock.close()
             return bert_response
-        except socket.timeout, e:
+        except socket.timeout:
             raise error.ReadTimeoutError('No response from %s:%s in %ss' % 
                 (self.service.host, self.service.port, self.service.timeout))
-        except socket.error, e:
-            raise error.ConnectionError('Unable to connect to %s:%s' % (self.service.host, self.service.port))
-
 
 class Encoder(object):
     def encode(self, python_request):
