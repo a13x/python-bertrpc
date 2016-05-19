@@ -22,6 +22,13 @@ class Service(object):
     def close(self):
         self.sock.close()
 
+    def __enter__(self):
+        self.connect()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
     def __getattr__(self, attr):
         def verify_options(options):
             if options is not None:
